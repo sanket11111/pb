@@ -1,0 +1,59 @@
+version: 0.2
+
+env:
+  variables:
+    STAGE_NAME: ${STAGE_NAME}
+    PROJECT_PREFIX: pbschool
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 12
+    commands:
+      - curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | sudo apt-key add -
+      - echo [PHASE] Entered the install phase...
+      - apt-get update
+      - apt-get install -y jq
+      # - npm install awscli --upgrade --user -g
+      - aws --version
+      - export HOME_DIR=$PWD
+      - echo Starting npm install...
+      - cd "$HOME_DIR"
+      - echo npm version
+      - npm --version
+      - echo node version
+      - node --version
+      - echo Stage Name is "$STAGE_NAME"
+      - echo Run install in root for server...
+      - npm install
+      - npm install -g serverless@1.61.2
+      - npm install -g webpack-cli
+  pre_build:
+    commands:
+      - echo [PHASE] Entered the pre_build phase...
+  build:
+    commands:
+      - echo [PHASE] Entered the build phase...
+      - echo Making server build...
+      - npm run create_build # Make a single build
+  post_build:
+    commands:
+      - echo [PHASE] Entered the post_build phase...
+      - SLS_DEBUG=* serverless deploy --stage $STAGE_NAME --verbose #Pass the required values from secret-manager, IF REQUIRED
+      - echo 'server deployment completed...'
+      # API gateway has some errors with custom tags so to add/update tags we have used awscli
+      - echo 'going to update tags for API-Gateway...'
+      - FunctionDetails=$(aws lambda get-function  --function-name  $PROJECT_PREFIX-mainServer-$STAGE_NAME)
+      - echo ${FunctionDetails}
+      - FunctionConfiguration=$(echo $FunctionDetails | jq -r '.Configuration')
+      - echo ${FunctionConfiguration}
+      - FunctionEnvironment=$(echo $FunctionConfiguration | jq -r '.Environment')
+      - echo ${FunctionEnvironment}
+      - FunctionEnvironmentVariables=$(echo $FunctionEnvironment | jq -r '.Variables')
+      - echo ${FunctionEnvironmentVariables}
+      - ApiGatewayArn=$(echo $FunctionEnvironmentVariables | jq -r '.API_GATEWAY_ARN')
+      # - LambdaArn=$(echo $FunctionEnvironmentVariables | jq -r '.LAMBDA_ARN')
+      - echo ${ApiGatewayArn}
+      # - echo ${LambdaArn}
+      - aws apigateway tag-resource --resource-arn ${ApiGatewayArn} --tags environment=$STAGE_NAME,cost_center=billing,project=pb-school
+      # - aws apigateway tag-resource --resource-arn ${LambdaArn} --tags $STAGE_NAME=Afzal,cost_center=billing,project=pb-school

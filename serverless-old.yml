@@ -1,0 +1,480 @@
+app: poker-school
+service: ${self:app}
+# Custom variable declaration.
+custom:
+  ProjectPrefix: pbschool
+  SECRETS: ${file(./utils/secret-manager.js):readSecrets}
+  RESOURCE_PREFIX: ${opt:projectPrefix, self:custom.ProjectPrefix}
+  envAbbreviations:
+    dev: -dev
+    staging: -staging
+    prod: '-prod'
+    qa: -qa
+
+provider:
+  name: aws
+  runtime: nodejs14.x
+  role: CustomLambdaRole
+  stage: ${opt:stage, 'dev'}
+  #fallback strategy
+  region: ${opt:region, 'ap-south-1'}
+  stackName: ${self:custom.RESOURCE_PREFIX}${self:custom.envAbbreviations.${self:provider.stage}} # pbschool-dev, pbschool-qa, pbschool
+  apiName: ${self:custom.RESOURCE_PREFIX}${self:custom.envAbbreviations.${self:provider.stage}}
+  deploymentBucket:
+    name: ${self:custom.SECRETS.DeploymentBucket} # ? deployment bucket, pre created
+  deploymentPrefix: ${self:custom.RESOURCE_PREFIX}
+  memorySize: 256
+  timeout: 30
+  environment:
+    FIREBASEVALIDATOR: ${self:custom.RESOURCE_PREFIX}-getFirebaseValidation${self:custom.envAbbreviations.${self:provider.stage}}
+  # Here we can set the environment variables which will be assign to all lambdas.
+  # environment:
+  # key: value
+  # ${opt:stage, self:provider.stage} - opt:stage means it tells to serverless to use --stage flag value for the stage variable from CLI if exists.
+  # self:provider.stage tells serverless to use the default stage value from provider
+plugins:
+  # This plugin enables use of AWS aliases on Lambda functions
+  - serverless-aws-alias
+  - serverless-offline
+  - serverless-prune-plugin
+  # - serverless-plugin-elastic-beanstalk
+resources:
+  Resources:
+    CustomLambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        Path: /
+        RoleName: ${self:custom.RESOURCE_PREFIX}-CustomLambdaRole${self:custom.envAbbreviations.${self:provider.stage}} # required if you want to use 'serverless deploy --function' later on
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+                  - edgelambda.amazonaws.com
+              Action: sts:AssumeRole
+        # note that these rights are needed if you want your function to be able to communicate with resources within your vpc
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Policies:
+          - PolicyName: ${self:custom.RESOURCE_PREFIX}-CustomLambdaPolicy${self:custom.envAbbreviations.${self:provider.stage}}
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogStream
+                    - logs:CreateLogGroup
+                    - logs:PutLogEvents
+                    - s3:*
+                    - secretsmanager:GetSecretValue
+                    - secretsmanager:DescribeSecret
+                    - secretsmanager:PutSecretValue
+                    - secretsmanager:UpdateSecret
+                    - secretsmanager:CreateSecret
+                    - secretsmanager:ListSecrets
+                    - s3:GetBucketLocation
+                    - s3:ListBucket
+                    - s3:GetObject
+                    - lambda:InvokeFunction
+                  Resource: '*'
+    RedisCacheSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Security group for redis cache
+        VpcId: ${self:custom.config.VPC_ID, '${self:custom.SECRETS.VpcID}'} # TODO add into secret-manager
+    ElastiCacheSubnetGroup:
+      Type: AWS::ElastiCache::SubnetGroup
+      Properties:
+        CacheSubnetGroupName: ${self:custom.RESOURCE_PREFIX}-subnetGroup${self:custom.envAbbreviations.${self:provider.stage}}
+        Description: Cache Subnet Group
+        SubnetIds:
+          - ${self:custom.SECRETS.PrivateSubnetID1}
+          - ${self:custom.SECRETS.PrivateSubnetID2}
+    ElasticCacheCluster:
+      Type: AWS::ElastiCache::CacheCluster
+      Properties:
+        ClusterName: ${self:custom.RESOURCE_PREFIX}-cluster${self:custom.envAbbreviations.${self:provider.stage}}
+        VpcSecurityGroupIds:
+          - !GetAtt
+            - RedisCacheSG
+            - GroupId
+        CacheSubnetGroupName: ${self:custom.RESOURCE_PREFIX}-subnetGroup${self:custom.envAbbreviations.${self:provider.stage}}
+        AutoMinorVersionUpgrade: true
+        Engine: redis
+        CacheNodeType: cache.t2.micro
+        NumCacheNodes: 1
+    ## Create beanstalk app and it's environment.
+    PbSchoolApp:
+      Type: AWS::ElasticBeanstalk::Application
+      Properties:
+        ApplicationName: ${self:custom.RESOURCE_PREFIX}-app${self:custom.envAbbreviations.${self:provider.stage}}
+        Description: PbSchool application
+    PbSchoolEnv:
+      Type: AWS::ElasticBeanstalk::Environment
+      Properties:
+        ApplicationName:
+          Ref: PbSchoolApp
+        EnvironmentName: ${self:custom.RESOURCE_PREFIX}-env${self:custom.envAbbreviations.${self:provider.stage}}
+        Description: PbSchool application ${self:custom.envAbbreviations.${self:provider.stage}} environment
+        SolutionStackName: '64bit Amazon Linux 2 v5.4.4 running Node.js 14'
+        Tier:
+          Name: WebServer
+          Type: Standard
+          Version: ' '
+        OptionSettings:
+          # - Namespace: aws:elasticbeanstalk:container:nodejs
+          #   OptionName: NodeVersion
+          #   Value: '13.8.0'
+          - Namespace: aws:elasticbeanstalk:environment
+            OptionName: EnvironmentType
+            Value: SingleInstance
+          - Namespace: aws:autoscaling:launchconfiguration
+            OptionName: InstanceType
+            Value: ${self:custom.SECRETS.EBInstanceCapacity}
+          - Namespace: aws:ec2:vpc
+            OptionName: Subnets
+            Value: !Join
+              - ','
+              - - ${self:custom.SECRETS.PublicSubnetID1}
+                - ${self:custom.SECRETS.PublicSubnetID2}
+          - Namespace: aws:autoscaling:launchconfiguration
+            OptionName: IamInstanceProfile
+            Value: aws-elasticbeanstalk-ec2-role
+          - Namespace: aws:elasticbeanstalk:environment
+            OptionName: ServiceRole
+            Value: aws-elasticbeanstalk-service-role
+          - Namespace: aws:ec2:vpc
+            OptionName: VPCId
+            Value: ${self:custom.SECRETS.VpcID}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_PASSWORD
+            Value: ${self:custom.SECRETS.DatabasePassword}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_SSL
+            Value: ${self:custom.SECRETS.DatabaseSSL}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: HOST
+            Value: ${self:custom.SECRETS.Host}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: PORT
+            Value: ${self:custom.SECRETS.Port}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_HOST
+            Value: ${self:custom.SECRETS.DatabaseHost}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_NAME
+            Value: ${self:custom.SECRETS.DatabaseName}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_USERNAME
+            Value: ${self:custom.SECRETS.DatabaseUserName}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: AUTHENTICATION_DATABASE
+            Value: ${self:custom.SECRETS.AuthenticationDatabase}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_SRV
+            Value: ${self:custom.SECRETS.DatabaseSRV}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_SSL
+            Value: ${self:custom.SECRETS.DatabaseSSL}
+          - Namespace: aws:elasticbeanstalk:application:environment
+            OptionName: DATABASE_PORT
+            Value: ${self:custom.SECRETS.DatabasePort}
+
+functions:
+  getAllChapter:
+    name: ${self:custom.RESOURCE_PREFIX}-getAllChapter${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/chapters
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getChapterForCourse:
+    name: ${self:custom.RESOURCE_PREFIX}-getChapterForCourse${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/courses/chapters
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getChapterQuizDetails:
+    name: ${self:custom.RESOURCE_PREFIX}getChapterQuizDetails${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/chapters/quizzes
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getAllCourse:
+    name: ${self:custom.RESOURCE_PREFIX}-getAllCourse${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/courses
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getFeeds:
+    name: ${self:custom.RESOURCE_PREFIX}-getFeeds${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/feeds
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getAllFreeVideo:
+    name: ${self:custom.RESOURCE_PREFIX}-getAllFreeVideo${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/freevideos
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getFreeQuiz:
+    name: ${self:custom.RESOURCE_PREFIX}-getFreeQuiz${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/freequizzes
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getAllFreeQuiz:
+    name: ${self:custom.RESOURCE_PREFIX}-getAllFreeQuiz${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/freequiz
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  operations:
+    name: ${self:custom.RESOURCE_PREFIX}-operations${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/homepage
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getLiveStream:
+    name: ${self:custom.RESOURCE_PREFIX}-getLiveStream${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/livestreams
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getBanners:
+    name: ${self:custom.RESOURCE_PREFIX}-getBanners${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/banners
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getUserProgress:
+    name: ${self:custom.RESOURCE_PREFIX}-getUserProgress${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/userprogress
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  postUserProgress:
+    name: ${self:custom.RESOURCE_PREFIX}-postUserProgress${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/postuserprogress
+          method: post
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getQuizProgress:
+    name: ${self:custom.RESOURCE_PREFIX}-getQuizProgress${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/quizprogress
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getVideoProgress:
+    name: ${self:custom.RESOURCE_PREFIX}-getVideoProgress${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/videoprogress
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getChapterProgress:
+    name: ${self:custom.RESOURCE_PREFIX}-getChapterProgress${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/chapterprogress
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getCourseProgress:
+    name: ${self:custom.RESOURCE_PREFIX}-getCourseProgress${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/apihandler.main
+    events:
+      - http:
+          path: /v1/courseprogress
+          method: get
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true
+    vpc:
+      securityGroupIds:
+        - ${self:custom.SECRETS.SecurityGroupID}
+      subnetIds:
+        - ${self:custom.SECRETS.PrivateSubnetID1}
+        - ${self:custom.SECRETS.PrivateSubnetID2}
+
+  getFirebaseValidation:
+    name: ${self:custom.RESOURCE_PREFIX}-getFirebaseValidation${self:custom.envAbbreviations.${self:provider.stage}}
+    handler: handler/firebaseValidator.handler
+    package:
+      artifact: ./dist/apihandler.zip
+      individually: true

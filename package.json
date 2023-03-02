@@ -1,0 +1,44 @@
+{
+  "name": "pokerbaazi-school-app",
+  "version": "0.0.1",
+  "description": "This is API Server Code for PB School App",
+  "main": "apihandler.js",
+  "dependencies": {
+    "aws-sdk": "^2.977.0",
+    "axios": "^0.21.1",
+    "https-proxy-agent": "^5.0.0",
+    "log4js": "^6.3.0",
+    "mongodb": "^3.6.9",
+    "mongodb-client-encryption": "^1.2.6",
+    "mongoose": "^5.12.14",
+    "redis": "^3.1.2",
+    "serverless": "^1.61.2",
+    "serverless-aws-alias": "^1.8.0",
+    "uniqid": "^5.3.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.10.5",
+    "@babel/plugin-proposal-class-properties": "^7.10.4",
+    "@serverless/eslint-config": "^2.1.1",
+    "babel-eslint": "^10.1.0",
+    "babel-loader": "^8.1.0",
+    "json-loader": "^0.5.7",
+    "raw-loader": "^4.0.1",
+    "serverless-domain-manager": "^5.1.0",
+    "serverless-offline": "^7.1.0",
+    "serverless-prune-plugin": "^1.5.1",
+    "terser-webpack-plugin": "^3.0.7",
+    "webpack": "^4.43.0",
+    "webpack-cli": "^3.3.12",
+    "webpack-node-externals": "^1.7.2"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "create_build": "npx webpack && cd dist && zip -9rq apihandler.zip . && cd ..",
+    "deploy_dev": "serverless deploy --stage dev",
+    "npm_build_n_deploy_dev": "npm run create_build && npm run deploy_dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
